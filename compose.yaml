@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fremiq
+      POSTGRES_USER: fremiq
+      POSTGRES_PASSWORD: ${FREMIQ_DB_PASSWORD:?Set FREMIQ_DB_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fremiq -d fremiq"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://fremiq:${FREMIQ_DB_PASSWORD:?Set FREMIQ_DB_PASSWORD in .env}@db:5432/fremiq
+      FREMIQ_SECRET: ${FREMIQ_SECRET:?Set FREMIQ_SECRET in .env}
+      FREMIQ_DATA_DIR: /var/lib/fremiq
+      FFMPEG_PATH: /usr/bin/ffmpeg
+      FFPROBE_PATH: /usr/bin/ffprobe
+    ports:
+      - "127.0.0.1:${FREMIQ_PORT:-4000}:4000"
+    volumes:
+      - fremiq-data:/var/lib/fremiq
+
+volumes:
+  postgres-data:
+  fremiq-data:

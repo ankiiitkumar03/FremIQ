@@ -42,3 +42,6 @@ jobs:
 
       - name: Production build
         run: bun run build
+
+      - name: Build deployment image
+        run: docker build --tag fremiq:ci .

@@ -27,6 +27,10 @@ The local development command applies any pending database migrations before sta
 
 Open http://localhost:4000. FREMIQ has no app login and stores one shared workspace. Keep this local/private; do not expose it directly to the public internet. See [DEPLOYMENT.md](DEPLOYMENT.md) before deploying.
 
+### Docker Compose
+
+With Docker Desktop installed, copy `.env.docker.example` to `.env`, replace both placeholder secrets with unique random values, then run `docker compose up --build -d`. Open http://localhost:4000. Compose keeps PostgreSQL and media in persistent volumes and binds the app only to this computer. Use `docker compose logs -f app` to follow startup; migrations run automatically. This is a private single-workspace install, not a public multi-user service.
+
 ## Local transcription
 
 Download the Windows companion from **Local Agent → Download Windows agent** in FREMIQ. Extract it, run **Start FREMIQ Agent.bat**, pair with its displayed URL and code, then install Faster-Whisper from **Tool Manager**. The first launch requires Python 3.10+ and internet access; it creates a private environment automatically. Keep the agent window open while transcribing. CPU mode works without an NVIDIA GPU; the first model download may take time. FREMIQ itself must run on the same computer because a remote server cannot reach the agent's local-only address.
