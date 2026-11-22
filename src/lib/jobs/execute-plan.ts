@@ -52,8 +52,7 @@ export async function executePlan(
     .from(subtitleTracks)
     .where(eq(subtitleTracks.projectId, project.id))
     .orderBy(desc(subtitleTracks.updatedAt));
-  const subtitle =
-    subtitleRows.find((row) => row.mediaId === source.id) ?? subtitleRows[0] ?? null;
+  const subtitle = subtitleRows.find((row) => row.mediaId === source.id) ?? null;
 
   const warnings: string[] = [];
   const aspectRatio = (context.aspectRatio as string) ?? project.aspectRatio ?? "16:9";
