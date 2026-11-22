@@ -37,6 +37,48 @@ export function parseResolution(resolution: string) {
   return { width, height };
 }
 
+function sliceSubtitleCues(cues: SubtitleCue[], segments: ClipSegment[]): SubtitleCue[] {
+  const output: SubtitleCue[] = [];
+  let timelineOffset = 0;
+
+  for (const segment of segments) {
+    const duration = segment.end - segment.start;
+    for (const cue of cues) {
+      if (cue.end <= segment.start || cue.start >= segment.end) continue;
+
+      const clippedWords = cue.words?.filter(
+        (word) => word.end > segment.start && word.start < segment.end,
+      ).map((word) => ({
+        ...word,
+        start: Math.max(word.start, segment.start) - segment.start + timelineOffset,
+        end: Math.min(word.end, segment.end) - segment.start + timelineOffset,
+      }));
+      if (cue.words?.length && !clippedWords?.length) continue;
+
+      const cueStart = Math.max(cue.start, segment.start) - segment.start + timelineOffset;
+      const cueEnd = Math.min(cue.end, segment.end) - segment.start + timelineOffset;
+      const start = clippedWords?.[0]?.start ?? cueStart;
+      const end = clippedWords?.at(-1)?.end ?? cueEnd;
+      if (end <= start) continue;
+
+      const text = clippedWords?.length
+        ? clippedWords.map((word) => word.text).join(" ").replace(/\s+([,.;!?])/g, "$1")
+        : cue.text;
+      output.push({
+        ...cue,
+        id: `${cue.id}-${timelineOffset.toFixed(2)}`,
+        start,
+        end,
+        text,
+        ...(clippedWords ? { words: clippedWords } : {}),
+      });
+    }
+    timelineOffset += duration;
+  }
+
+  return output;
+}
+
 function escapeFilterPath(filePath: string) {
   return filePath.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
 }
@@ -373,18 +415,7 @@ async function renderSplitClipsSpec(
   filterParts.push(videoLabels.join("") + "concat=n=" + videoLabels.length + ":v=1:a=0[vcat]");
   filterParts.push(audioLabels.join("") + "concat=n=" + audioLabels.length + ":v=0:a=1[asrc]");
 
-  let cues: SubtitleCue[] = [];
-  let timelineOffset = 0;
-  for (const segment of spec.segments) {
-    const duration = segment.end - segment.start;
-    for (const cue of spec.subtitles?.cues ?? []) {
-      if (cue.end <= segment.start || cue.start >= segment.end) continue;
-      const start = Math.max(0, cue.start - segment.start) + timelineOffset;
-      const end = Math.min(duration, cue.end - segment.start) + timelineOffset;
-      if (end > start) cues.push({ ...cue, id: cue.id + "-" + timelineOffset.toFixed(2), start, end });
-    }
-    timelineOffset += duration;
-  }
+  let cues = sliceSubtitleCues(spec.subtitles?.cues ?? [], spec.segments);
   if (spec.titleCard) {
     cues = [
       { id: "title-card", start: 0, end: Math.min(2.4, totalDuration), text: spec.titleCard },
@@ -470,31 +501,7 @@ async function renderClipsSpec(
     fps: spec.fps,
   });
 
-  let cues = spec.subtitles?.cues ?? [];
-  if (cues.length > 0) {
-    const shifted: SubtitleCue[] = [];
-    let offset = 0;
-    for (const segment of spec.segments) {
-      const segmentDuration = segment.end - segment.start;
-      const overlapping = cues.filter(
-        (cue) => cue.end > segment.start && cue.start < segment.end,
-      );
-      for (const cue of overlapping) {
-        const start = Math.max(0, cue.start - segment.start) + offset;
-        const end = Math.min(segmentDuration, cue.end - segment.start) + offset;
-        if (end > start) {
-          shifted.push({
-            ...cue,
-            id: `${cue.id}-${offset.toFixed(2)}`,
-            start,
-            end,
-          });
-        }
-      }
-      offset += segmentDuration;
-    }
-    cues = shifted;
-  }
+  let cues = sliceSubtitleCues(spec.subtitles?.cues ?? [], spec.segments);
 
   if (spec.titleCard) {
     cues = [
