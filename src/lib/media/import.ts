@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import AdmZip from "adm-zip";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
@@ -81,17 +83,25 @@ export async function importUploadedFile(
   const relativePath = `media/${storedName}`;
   const absolutePath = resolveDataPath(relativePath);
   fs.mkdirSync(dirs.media, { recursive: true });
-  const buffer = Buffer.from(await file.arrayBuffer());
-  fs.writeFileSync(absolutePath, buffer);
+  try {
+    // Stream the upload to disk instead of allocating a second, full-size buffer.
+    await pipeline(
+      Readable.fromWeb(file.stream() as import("node:stream/web").ReadableStream),
+      fs.createWriteStream(absolutePath, { flags: "wx" }),
+    );
 
-  return registerImportedFile({
-    projectId,
-    originalName,
-    mimeType: file.type || mimeForExtension(path.extname(originalName)),
-    sizeBytes: file.size,
-    relativePath,
-    absolutePath,
-  });
+    return await registerImportedFile({
+      projectId,
+      originalName,
+      mimeType: file.type || mimeForExtension(path.extname(originalName)),
+      sizeBytes: file.size,
+      relativePath,
+      absolutePath,
+    });
+  } catch (error) {
+    fs.rmSync(absolutePath, { force: true });
+    throw error;
+  }
 }
 
 export async function importLocalVideoFile(
