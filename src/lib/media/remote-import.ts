@@ -179,15 +179,26 @@ export async function importVideoFromUrl(urlValue: string, projectId: string) {
         response.destroy();
         throw new Error("Video exceeds the 2 GB import limit");
       }
-      await file.write(value);
+      let offset = 0;
+      while (offset < value.length) {
+        const { bytesWritten } = await file.write(value, offset, value.length - offset);
+        if (bytesWritten === 0) throw new Error("Could not write the downloaded video to disk");
+        offset += bytesWritten;
+      }
     }
     if (sizeBytes === 0) throw new Error("The video host returned an empty file");
-    return await importLocalVideoFile(temporaryPath, projectId, originalName, contentType);
   } catch (error) {
     response.destroy();
     throw error;
   } finally {
     await file.close();
+  }
+
+  try {
+    // Close the temporary file before importLocalVideoFile renames it; Windows
+    // can reject renaming a file while its handle is still open.
+    return await importLocalVideoFile(temporaryPath, projectId, originalName, contentType);
+  } finally {
     await rm(temporaryPath, { force: true });
   }
 }
