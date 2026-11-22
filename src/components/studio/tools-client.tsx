@@ -619,7 +619,7 @@ export function ToolsClient({
       </Tabs>
 
       <Dialog open={Boolean(selected)} onOpenChange={(open) => (!open ? setSelected(null) : null)}>
-        <DialogContent className="max-h-[88vh] max-w-2xl overflow-y-auto">
+        <DialogContent className="min-w-0 w-[calc(100vw-2rem)] max-h-[88vh] max-w-2xl overflow-x-hidden overflow-y-auto">
           {definition && selected ? (
             <>
               <DialogHeader>
@@ -654,7 +654,7 @@ export function ToolsClient({
                 </DialogDescription>
               </DialogHeader>
 
-              <div className="space-y-4">
+              <div className="min-w-0 space-y-4">
                 <div className="grid grid-cols-2 gap-2 text-[11px]">
                   <Info label="Category" value={definition.category} />
                   <Info label="License" value={definition.license.name} />
@@ -791,7 +791,7 @@ export function ToolsClient({
                 {command ? (
                   <div className="rounded-lg border border-border/70 bg-surface/40 p-3">
                     <h4 className="text-xs font-medium">Installation command (reviewed registry)</h4>
-                    <pre className="mt-1.5 overflow-x-auto rounded-md bg-black/40 p-2 text-[10px] text-muted-foreground">
+                    <pre className="mt-1.5 min-w-0 whitespace-pre-wrap break-all rounded-md bg-black/40 p-2 text-[10px] text-muted-foreground">
                       {command}
                     </pre>
                     <p className="mt-1.5 text-[10px] leading-relaxed text-muted-foreground">
