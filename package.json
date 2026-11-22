@@ -12,7 +12,8 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
     "db:seed": "bun run src/lib/db/seed.ts",
-    "agent:package": "bun run scripts/package-local-agent.ts"
+    "agent:package": "bun run scripts/package-local-agent.ts",
+    "agent:verify": "bun run scripts/verify-local-agent-package.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
