@@ -47,6 +47,15 @@ export type MediaRow = {
 
 const filters = ["all", "video", "audio", "image", "archive"] as const;
 
+function isYouTubeLink(value: string) {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase().replace(/^www\./, "");
+    return ["youtube.com", "m.youtube.com", "youtu.be", "youtube-nocookie.com"].includes(hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function MediaClient({
   projectId,
   projectName,
@@ -66,6 +75,7 @@ export function MediaClient({
   const [preview, setPreview] = React.useState<MediaRow | null>(null);
   const [deleting, setDeleting] = React.useState<string | null>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const youtubeLinkEntered = isYouTubeLink(videoUrl.trim());
 
   function openNextStep(mediaId: string) {
     const encodedId = encodeURIComponent(mediaId);
@@ -250,8 +260,15 @@ export function MediaClient({
             </Button>
           </form>
           <p className="text-[10px] text-muted-foreground">
-            For a video on this device, choose <strong className="font-medium text-foreground">Upload media</strong> (a local path such as C:\Videos\clip.mp4 is not accessible to the web app). Direct downloadable video-file links work. YouTube watch/live links cannot be imported as source files; upload a video you own or have permission to edit.
+            For a video on this device, choose <strong className="font-medium text-foreground">Upload media</strong> (a local path such as C:\Videos\clip.mp4 is not accessible to the web app). Direct downloadable video-file links work.
           </p>
+          {youtubeLinkEntered ? (
+            <p className="rounded-md border border-brand/30 bg-brand/5 p-2 text-[10px] leading-relaxed text-muted-foreground">
+              YouTube watch/live links cannot be imported directly. If you own the video or have permission to edit it, download/export the file through{" "}
+              <a href="https://studio.youtube.com/" target="_blank" rel="noreferrer" className="font-medium text-brand hover:underline">YouTube Studio</a>{" "}
+              and then choose <strong className="font-medium text-foreground">Upload media</strong>.
+            </p>
+          ) : null}
         </CardContent>
       </Card>
 
