@@ -92,6 +92,9 @@ export function ClipsClient({
   const [focus, setFocus] = React.useState("");
   const [trimStart, setTrimStart] = React.useState("00:00:00");
   const [trimEnd, setTrimEnd] = React.useState("00:00:30");
+  const [splitCameraMediaId, setSplitCameraMediaId] = React.useState("none");
+  const [splitLayout, setSplitLayout] = React.useState<"top-bottom" | "side-by-side">("top-bottom");
+  const [cameraOffsetSec, setCameraOffsetSec] = React.useState(0);
   const [aspect, setAspect] = React.useState(defaultAspect);
   const [backend, setBackend] = React.useState(
     backends.some((item) => item.key === defaultBackend) ? defaultBackend : "ffmpeg",
@@ -106,15 +109,19 @@ export function ClipsClient({
   const [previewIndex, setPreviewIndex] = React.useState(0);
   const autoAnalysisFor = React.useRef<string | null>(null);
   const clipPreviewRef = React.useRef<HTMLVideoElement>(null);
+  const cameraPreviewRef = React.useRef<HTMLVideoElement>(null);
 
   const source = videos.find((video) => video.id === mediaId) ?? null;
+  const splitCamera = videos.find((video) => video.id === splitCameraMediaId) ?? null;
   const sourceSubtitles = React.useMemo(
     () => subtitles.filter((track) => track.mediaId === mediaId),
     [subtitles, mediaId],
   );
   const previewCandidate = candidates[previewIndex] ?? candidates[0] ?? null;
   const resolution = aspectOptions.find((option) => option.value === aspect)?.resolution ?? "1080x1920";
-  const selectedBackend = backends.find((item) => item.key === backend) ?? backends.find((item) => item.key === "ffmpeg");
+  const splitScreenEnabled = splitCameraMediaId !== "none";
+  const selectedBackendKey = splitScreenEnabled ? "ffmpeg" : backend;
+  const selectedBackend = backends.find((item) => item.key === selectedBackendKey) ?? backends.find((item) => item.key === "ffmpeg");
 
   React.useEffect(() => {
     if (initialMediaId && videos.some((video) => video.id === initialMediaId)) {
@@ -198,6 +205,19 @@ export function ClipsClient({
     };
   }, [previewCandidate?.start, source?.id]);
 
+  React.useEffect(() => {
+    const player = cameraPreviewRef.current;
+    if (!player || !previewCandidate || !splitCamera) return;
+    const seek = () => {
+      const time = previewCandidate.start + cameraOffsetSec;
+      player.currentTime = Number.isFinite(player.duration) ? Math.min(time, Math.max(0, player.duration - 0.05)) : time;
+      player.pause();
+    };
+    if (player.readyState >= 1) seek();
+    else player.addEventListener("loadedmetadata", seek, { once: true });
+    return () => player.removeEventListener("loadedmetadata", seek);
+  }, [previewCandidate?.start, splitCamera?.id, cameraOffsetSec]);
+
   async function render() {
     if (!projectId || !mediaId) return;
     const chosen = candidates.filter((_, index) => selected.has(index));
@@ -214,7 +234,10 @@ export function ClipsClient({
         aspectRatio: aspect,
         resolution,
         fps: defaultFps,
-        backend: selectedBackend?.key ?? "ffmpeg",
+        backend: selectedBackendKey,
+        splitCameraMediaId: splitScreenEnabled ? splitCameraMediaId : undefined,
+        splitLayout,
+        cameraOffsetSec,
         subtitleTrackId: subtitleTrackId === "none" ? undefined : subtitleTrackId,
       });
       toast.success(`Queued ${data.jobs.length} clip render${data.jobs.length === 1 ? "" : "s"}`);
@@ -283,6 +306,7 @@ export function ClipsClient({
               value={mediaId}
               onValueChange={(value) => {
                 setMediaId(value);
+                if (value === splitCameraMediaId) setSplitCameraMediaId("none");
                 setCandidates([]);
                 setSelected(new Set());
                 setAnalysis(null);
@@ -307,6 +331,58 @@ export function ClipsClient({
               <video src={`/api/media/${source.id}/file?inline=1`} controls aria-label={`Preview ${source.name}`} className="max-h-44 w-full" />
             </div>
           ) : null}
+
+          <div className="space-y-2 rounded-lg border border-border/70 bg-surface/40 p-2.5">
+            <Field
+              label="Second video · facecam or streamer"
+              hint="Optional. Both videos use the same clip times; the second video's audio stays muted."
+            >
+              <Select
+                value={splitCameraMediaId}
+                onValueChange={(value) => {
+                  setSplitCameraMediaId(value);
+                  if (value !== "none") setBackend("ffmpeg");
+                }}
+              >
+                <SelectTrigger className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Off · single video</SelectItem>
+                  {videos.filter((video) => video.id !== mediaId).map((video) => (
+                    <SelectItem key={video.id} value={video.id}>{video.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+            {splitScreenEnabled ? (
+              <>
+                <Field label="Split layout">
+                  <Select value={splitLayout} onValueChange={(value) => setSplitLayout(value as "top-bottom" | "side-by-side")}>
+                    <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="top-bottom">Top / bottom · stacked halves</SelectItem>
+                      <SelectItem value="side-by-side">Left / right · side by side</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Second video start offset (seconds)" hint="Use this when the camera recording starts later than the main video.">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={3600}
+                    step={0.1}
+                    value={cameraOffsetSec}
+                    onChange={(event) => setCameraOffsetSec(Math.max(0, Number(event.target.value) || 0))}
+                    className="h-9"
+                  />
+                </Field>
+                <p className="text-[10px] leading-relaxed text-muted-foreground">
+                  Split-screen export uses FFmpeg, keeps audio from the main video, and burns the selected captions.
+                </p>
+              </>
+            ) : null}
+          </div>
 
           <div className="grid grid-cols-2 gap-2">
             <Field label="Clips">
@@ -372,8 +448,8 @@ export function ClipsClient({
             </Select>
           </Field>
 
-          <Field label="Render engine" hint="FFmpeg is the default. HyperFrames and Remotion are optional advanced engines.">
-            <Select value={backend} onValueChange={setBackend}>
+          <Field label="Render engine" hint={splitScreenEnabled ? "Split-screen exports use FFmpeg." : "FFmpeg is the default. HyperFrames and Remotion are optional advanced engines."}>
+            <Select value={selectedBackendKey} onValueChange={setBackend} disabled={splitScreenEnabled}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -455,23 +531,44 @@ export function ClipsClient({
                   {selected.has(previewIndex) ? "Selected for export" : "Preview only"}
                 </Badge>
               </div>
-              <video
-                ref={clipPreviewRef}
-                src={`/api/media/${source.id}/file?inline=1`}
-                aria-label={`Preview clip from ${source.name}`}
-                controls
-                playsInline
-                preload="metadata"
-                onTimeUpdate={(event) => {
-                  const player = event.currentTarget;
-                  if (previewCandidate && player.currentTime >= previewCandidate.end) {
-                    player.pause();
-                    player.currentTime = previewCandidate.start;
-                  }
-                }}
-                className="max-h-[52vh] w-full rounded-lg bg-black"
-              />
-              <p className="text-[10px] text-muted-foreground">Playback stops at this clip&apos;s end.</p>
+              <div className={cn("mx-auto flex max-h-[52vh] overflow-hidden rounded-lg bg-black", splitScreenEnabled && splitLayout === "side-by-side" ? "flex-row" : "flex-col")} style={{ aspectRatio: aspect.replace(":", " / "), maxWidth: "100%" }}>
+                <video
+                  ref={clipPreviewRef}
+                  src={`/api/media/${source.id}/file?inline=1`}
+                  aria-label={`Preview clip from ${source.name}`}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  onPlay={() => { void cameraPreviewRef.current?.play().catch(() => undefined); }}
+                  onPause={() => cameraPreviewRef.current?.pause()}
+                  onTimeUpdate={(event) => {
+                    const player = event.currentTarget;
+                    const cameraPlayer = cameraPreviewRef.current;
+                    if (cameraPlayer && splitCamera) {
+                      const target = player.currentTime + cameraOffsetSec;
+                      if (Math.abs(cameraPlayer.currentTime - target) > 0.25) cameraPlayer.currentTime = target;
+                    }
+                    if (previewCandidate && player.currentTime >= previewCandidate.end) {
+                      player.pause();
+                      if (cameraPlayer) cameraPlayer.pause();
+                      player.currentTime = previewCandidate.start;
+                    }
+                  }}
+                  className={cn("min-h-0 min-w-0 bg-black object-contain", splitScreenEnabled ? (splitLayout === "side-by-side" ? "h-full w-1/2" : "h-1/2 w-full") : "h-full w-full")}
+                />
+                {splitCamera ? (
+                  <video
+                    ref={cameraPreviewRef}
+                    src={`/api/media/${splitCamera.id}/file?inline=1`}
+                    aria-label={`Synchronized second video ${splitCamera.name}`}
+                    muted
+                    playsInline
+                    preload="metadata"
+                    className={cn("min-h-0 min-w-0 bg-black object-contain", splitLayout === "side-by-side" ? "h-full w-1/2" : "h-1/2 w-full")}
+                  />
+                ) : null}
+              </div>
+              <p className="text-[10px] text-muted-foreground">{splitCamera ? "Both videos preview in sync; export keeps audio from the main video." : "Playback stops at this clip's end."}</p>
             </CardContent>
           </Card>
         ) : null}

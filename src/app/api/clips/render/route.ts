@@ -26,6 +26,17 @@ export async function POST(request: Request) {
     if (!source || source.projectId !== project.id || source.kind !== "video") {
       return fail("Choose a video from this project", 400);
     }
+    const splitCameraId = typeof body.splitCameraMediaId === "string" ? body.splitCameraMediaId : "";
+    const splitCamera = splitCameraId
+      ? (await db.select().from(media).where(eq(media.id, splitCameraId)).limit(1))[0]
+      : null;
+    if (splitCameraId && (!splitCamera || splitCamera.projectId !== project.id || splitCamera.kind !== "video" || splitCamera.id === source.id)) {
+      return fail("Choose a different camera video from this project", 400);
+    }
+    const cameraOffsetSec = Number(body.cameraOffsetSec ?? 0);
+    if (!Number.isFinite(cameraOffsetSec) || cameraOffsetSec < 0 || cameraOffsetSec > 3600) {
+      return fail("Camera start offset must be between 0 and 3600 seconds", 400);
+    }
 
     const candidates = Array.isArray(body.candidates) ? (body.candidates as ClipSegment[]) : [];
     if (candidates.length === 0) return fail("Select at least one clip candidate", 400);
@@ -35,9 +46,12 @@ export async function POST(request: Request) {
         (candidate) =>
           typeof candidate.start !== "number" ||
           typeof candidate.end !== "number" ||
+          !Number.isFinite(candidate.start) ||
+          !Number.isFinite(candidate.end) ||
           candidate.start < 0 ||
           candidate.end <= candidate.start ||
-          candidate.end > (source.durationSec ?? 0) + 0.5,
+          candidate.end > (source.durationSec ?? 0) + 0.05 ||
+          (splitCamera && candidate.end + cameraOffsetSec > (splitCamera.durationSec ?? 0) + 0.05),
       )
     ) {
       return fail("One or more clip ranges are invalid", 400);
@@ -47,6 +61,9 @@ export async function POST(request: Request) {
     const resolution = typeof body.resolution === "string" ? body.resolution : project.resolution;
     const fps = Number(body.fps ?? project.frameRate ?? 30);
     const backend = isRenderBackendKey(body.backend) ? body.backend : "ffmpeg";
+    if (splitCamera && backend !== "ffmpeg") {
+      return fail("Split-screen export currently uses FFmpeg. Select FFmpeg as the render engine.", 400);
+    }
     const renderSpec = {
       type: "clips" as const,
       sourceMediaId: source.id,
@@ -56,6 +73,13 @@ export async function POST(request: Request) {
       fps,
       subtitles: null as { cues: SubtitleCue[]; style: SubtitleStyle } | null,
       titleCard: null,
+      splitScreen: splitCamera
+        ? {
+            mediaId: splitCamera.id,
+            layout: body.splitLayout === "side-by-side" ? "side-by-side" as const : "top-bottom" as const,
+            cameraOffsetSec,
+          }
+        : null,
     };
 
     let subtitle: { cues: SubtitleCue[]; style: SubtitleStyle } | null = null;

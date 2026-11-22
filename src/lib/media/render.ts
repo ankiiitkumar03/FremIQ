@@ -361,12 +361,186 @@ async function renderTimelineSpec(
   }
 }
 
+async function renderSplitClipsSpec(
+  spec: Extract<RenderSpec, { type: "clips" }>,
+  outputPath: string,
+  onProgress: RenderProgress,
+  signal?: AbortSignal,
+) {
+  if (!spec.splitScreen) throw new Error("Split-screen settings are missing");
+  const source = await loadMedia(spec.sourceMediaId);
+  const camera = await loadMedia(spec.splitScreen.mediaId);
+  if (source.row.kind !== "video" || camera.row.kind !== "video") {
+    throw new Error("Split-screen needs two video files");
+  }
+  const { width, height } = parseResolution(spec.resolution);
+  const paneWidth =
+    spec.splitScreen.layout === "side-by-side" ? Math.max(2, Math.floor(width / 4) * 2) : width;
+  const paneHeight =
+    spec.splitScreen.layout === "top-bottom" ? Math.max(2, Math.floor(height / 4) * 2) : height;
+  const plan = createInputPlan();
+  const sourceIndex = addInput(plan, "split-main:" + source.row.id, source.absolutePath);
+  const cameraIndex = addInput(plan, "split-camera:" + camera.row.id, camera.absolutePath);
+  const filterParts: string[] = [];
+  const videoLabels: string[] = [];
+  const audioLabels: string[] = [];
+  const offset = Math.max(0, spec.splitScreen.cameraOffsetSec);
+  let totalDuration = 0;
+
+  for (let index = 0; index < spec.segments.length; index += 1) {
+    const segment = spec.segments[index];
+    const start = Math.max(0, segment.start);
+    const end = segment.end;
+    const cameraStart = start + offset;
+    const cameraEnd = end + offset;
+    const duration = end - start;
+    if (
+      duration <= 0 ||
+      end > (source.row.durationSec ?? 0) + 0.05 ||
+      cameraEnd > (camera.row.durationSec ?? 0) + 0.05
+    ) {
+      throw new Error("A split-screen clip range exceeds one of the source videos");
+    }
+
+    const mainLabel = "main" + index;
+    const cameraLabel = "camera" + index;
+    const videoLabel = "v" + index;
+    const audioLabel = "a" + index;
+    const mainFilters = [
+      "trim=start=" + start.toFixed(3) + ":end=" + end.toFixed(3),
+      "setpts=PTS-STARTPTS",
+      "scale=" + paneWidth + ":" + paneHeight + ":force_original_aspect_ratio=increase",
+      "crop=" + paneWidth + ":" + paneHeight,
+      "fps=" + spec.fps,
+      "format=yuv420p",
+      "setsar=1",
+    ];
+    const cameraFilters = [
+      "trim=start=" + cameraStart.toFixed(3) + ":end=" + cameraEnd.toFixed(3),
+      "setpts=PTS-STARTPTS",
+      "scale=" + paneWidth + ":" + paneHeight + ":force_original_aspect_ratio=increase",
+      "crop=" + paneWidth + ":" + paneHeight,
+      "fps=" + spec.fps,
+      "format=yuv420p",
+      "setsar=1",
+    ];
+    filterParts.push("[" + sourceIndex + ":v]" + mainFilters.join(",") + "[" + mainLabel + "]");
+    filterParts.push("[" + cameraIndex + ":v]" + cameraFilters.join(",") + "[" + cameraLabel + "]");
+    const stack = spec.splitScreen.layout === "side-by-side" ? "hstack" : "vstack";
+    const stackedLabel = "stacked" + index;
+    filterParts.push(
+      "[" + mainLabel + "][" + cameraLabel + "]" + stack + "=inputs=2[" + stackedLabel + "]",
+    );
+    filterParts.push(
+      "[" + stackedLabel + "]pad=" + width + ":" + height + ":(ow-iw)/2:(oh-ih)/2:color=black,fps=" +
+        spec.fps + ",format=yuv420p,setsar=1[" + videoLabel + "]",
+    );
+
+    if (source.row.hasAudio) {
+      filterParts.push(
+        "[" + sourceIndex + ":a]atrim=start=" + start.toFixed(3) + ":end=" + end.toFixed(3) +
+          ",asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad,atrim=duration=" +
+          duration.toFixed(3) + "[" + audioLabel + "]",
+      );
+    } else {
+      filterParts.push(
+        "anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=" +
+          duration.toFixed(3) + ",asetpts=PTS-STARTPTS[" + audioLabel + "]",
+      );
+    }
+    videoLabels.push("[" + videoLabel + "]");
+    audioLabels.push("[" + audioLabel + "]");
+    totalDuration += duration;
+  }
+
+  filterParts.push(videoLabels.join("") + "concat=n=" + videoLabels.length + ":v=1:a=0[vcat]");
+  filterParts.push(audioLabels.join("") + "concat=n=" + audioLabels.length + ":v=0:a=1[asrc]");
+
+  let cues: SubtitleCue[] = [];
+  let timelineOffset = 0;
+  for (const segment of spec.segments) {
+    const duration = segment.end - segment.start;
+    for (const cue of spec.subtitles?.cues ?? []) {
+      if (cue.end <= segment.start || cue.start >= segment.end) continue;
+      const start = Math.max(0, cue.start - segment.start) + timelineOffset;
+      const end = Math.min(duration, cue.end - segment.start) + timelineOffset;
+      if (end > start) cues.push({ ...cue, id: cue.id + "-" + timelineOffset.toFixed(2), start, end });
+    }
+    timelineOffset += duration;
+  }
+  if (spec.titleCard) {
+    cues = [
+      { id: "title-card", start: 0, end: Math.min(2.4, totalDuration), text: spec.titleCard },
+      ...cues,
+    ];
+  }
+
+  let videoOut = "vcat";
+  if (cues.length > 0) {
+    const assPath = path.join(dirs.temp, "split-subs-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7) + ".ass");
+    fs.mkdirSync(dirs.temp, { recursive: true });
+    fs.writeFileSync(
+      assPath,
+      buildAssFile({ width, height, cues, style: spec.subtitles?.style ?? defaultSubtitleStyle }),
+      "utf8",
+    );
+    filterParts.push("[vcat]ass='" + escapeFilterPath(assPath) + "'[vout]");
+    videoOut = "vout";
+  }
+
+  await onProgress("Rendering", 0.08, "Synchronizing and stacking the two video sources");
+  const result = await runFfmpeg(
+    [
+      ...plan.args,
+      "-filter_complex",
+      filterParts.join(";"),
+      "-map",
+      "[" + videoOut + "]",
+      "-map",
+      "[asrc]",
+      "-t",
+      totalDuration.toFixed(3),
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "20",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
+      "-ar",
+      "48000",
+      "-movflags",
+      "+faststart",
+      "-y",
+      outputPath,
+    ],
+    {
+      totalDuration,
+      signal,
+      timeoutMs: 45 * 60 * 1000,
+      onProgress: (fraction, log) => onProgress("Rendering", 0.08 + fraction * 0.88, log),
+    },
+  );
+  if (result.code !== 0) {
+    throw new Error("FFmpeg split-screen render failed: " + result.stderr.split("\n").slice(-12).join("\n"));
+  }
+}
+
 async function renderClipsSpec(
   spec: Extract<RenderSpec, { type: "clips" }>,
   outputPath: string,
   onProgress: RenderProgress,
   signal?: AbortSignal,
 ) {
+  if (spec.splitScreen) {
+    await renderSplitClipsSpec(spec, outputPath, onProgress, signal);
+    return;
+  }
   const source = await loadMedia(spec.sourceMediaId);
   const totalSourceDuration = source.row.durationSec ?? 0;
 

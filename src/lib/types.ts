@@ -144,6 +144,11 @@ export type RenderSpec =
       fps: number;
       subtitles?: { cues: SubtitleCue[]; style: SubtitleStyle } | null;
       titleCard?: string | null;
+      splitScreen?: {
+        mediaId: string;
+        layout: "side-by-side" | "top-bottom";
+        cameraOffsetSec: number;
+      } | null;
     }
   | {
       type: "audio";
