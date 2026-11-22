@@ -21,8 +21,9 @@ FREMIQ does not download or import video from arbitrary YouTube watch/live links
 Requirements: Node.js 22+, Bun, PostgreSQL, and a persistent writable data folder. Copy .env.example to .env.local, set DATABASE_URL and a stable FREMIQ_SECRET (32+ random characters), then run:
 
 - bun install
-- bun run db:migrate
 - bun run dev --port 4000
+
+The local development command applies any pending database migrations before starting the app. If DATABASE_URL is missing, it shows the exact configuration step. Production releases should continue to run `bun run db:migrate` explicitly before deployment.
 
 Open http://localhost:4000. FREMIQ has no app login and stores one shared workspace. Keep this local/private; do not expose it directly to the public internet. See [DEPLOYMENT.md](DEPLOYMENT.md) before deploying.
 
