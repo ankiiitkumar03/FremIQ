@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "bun run db:migrate && next dev",
+    "dev": "bun --env-file=.env.local x drizzle-kit migrate && next dev",
     "build": "next build --webpack",
     "start": "next start --hostname 127.0.0.1",
     "start:container": "next start --hostname 0.0.0.0 --port 4000",

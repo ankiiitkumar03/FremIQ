@@ -29,7 +29,16 @@ Open http://localhost:4000. FREMIQ has no app login and stores one shared worksp
 
 ### Docker Compose
 
-With Docker Desktop installed, copy `.env.docker.example` to `.env`, replace both placeholder secrets with unique random values, then run `docker compose up --build -d`. Open http://localhost:4000. Compose keeps PostgreSQL and media in persistent volumes and binds the app only to this computer. Use `docker compose logs -f app` to follow startup; migrations run automatically. This is a private single-workspace install, not a public multi-user service.
+With Docker Desktop installed, copy `.env.docker.example` to `.env`, then set `FREMIQ_DB_PASSWORD` to a unique **hex-only** password (Compose inserts it into `DATABASE_URL`) and `FREMIQ_SECRET` to a separate random value of at least 32 characters. In PowerShell, generate either value with:
+
+```powershell
+$bytes = New-Object byte[] 32
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($bytes)
+[BitConverter]::ToString($bytes).Replace("-", "").ToLowerInvariant()
+```
+
+Use 24 bytes for `FREMIQ_DB_PASSWORD` and 32 bytes for `FREMIQ_SECRET`. Keep the secret stable so saved integrations remain readable. Then run `docker compose up --build -d` and open http://localhost:4000. Compose keeps PostgreSQL and media in persistent volumes and binds the app only to this computer. Use `docker compose logs -f app` to follow startup; migrations run automatically. This is a private single-workspace install, not a public multi-user service.
 
 ## Local transcription
 

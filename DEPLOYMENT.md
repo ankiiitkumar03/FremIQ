@@ -6,7 +6,7 @@ FREMIQ is a single-workspace Node.js application. PostgreSQL stores project data
 
 Deploy it as one persistent Node.js 22+ instance with a writable persistent data volume and a PostgreSQL database. Do not use a serverless target or multiple app replicas: local media paths and the in-process render queue are not shared or coordinated between instances.
 
-For a private single-machine install, the repository includes `Dockerfile` and `compose.yaml`. Copy `.env.docker.example` to `.env`, set unique values for `FREMIQ_DB_PASSWORD` and `FREMIQ_SECRET`, and run `docker compose up --build -d`. Compose binds port 4000 to host loopback only; keep it private. Back up both named volumes (`postgres-data` and `fremiq-data`).
+For a private single-machine install, the repository includes `Dockerfile` and `compose.yaml`. Copy `.env.docker.example` to `.env`, set a unique hex-only `FREMIQ_DB_PASSWORD` (it is interpolated into a PostgreSQL URL) and a separate stable `FREMIQ_SECRET` of at least 32 characters, then run `docker compose up --build -d`. Compose binds port 4000 to host loopback only; keep it private. Back up both named volumes (`postgres-data` and `fremiq-data`).
 
 ## Required configuration
 
