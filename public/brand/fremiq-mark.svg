@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="FREMIQ">
+  <defs>
+    <linearGradient id="fremiq-gradient" x1="14" y1="12" x2="50" y2="52" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E9D5FF"/>
+      <stop offset="0.5" stop-color="#A78BFA"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="#101116"/>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="15.5" fill="none" stroke="#30313C"/>
+  <path d="M19 15h27v8.5H28.5v7.2h14.8v8.4H28.5V49H19V15Z" fill="url(#fremiq-gradient)"/>
+  <path d="M42.5 35.5 48 41l-5.5 5.5" fill="none" stroke="#F5F5F7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+</svg>

@@ -1,0 +1,640 @@
+import fs from "node:fs";
+import path from "node:path";
+import { eq } from "drizzle-orm";
+import { db } from "@/lib/db";
+import { media, type MediaItem } from "@/lib/db/schema";
+import { dirs, resolveDataPath } from "@/lib/storage";
+import type {
+  ClipSegment,
+  RenderSpec,
+  SubtitleCue,
+  SubtitleStyle,
+  TimelineClip,
+  TimelineData,
+} from "@/lib/types";
+import { FFMPEG_PATH, runFfmpeg } from "./ffmpeg";
+import { probeMedia } from "./probe";
+import {
+  buildAssFile,
+  buildMotionAss,
+  cuesFromTimelineText,
+  defaultSubtitleStyle,
+} from "./subtitles";
+
+export type RenderProgress = (stage: string, fraction: number, log: string) => Promise<void> | void;
+
+export const aspectDimensions: Record<string, { width: number; height: number }> = {
+  "16:9": { width: 1920, height: 1080 },
+  "9:16": { width: 1080, height: 1920 },
+  "1:1": { width: 1080, height: 1080 },
+  "4:5": { width: 1080, height: 1350 },
+  "4:3": { width: 1440, height: 1080 },
+  "21:9": { width: 2520, height: 1080 },
+};
+
+export function parseResolution(resolution: string) {
+  const [width, height] = resolution.split("x").map(Number);
+  if (!width || !height) return { width: 1920, height: 1080 };
+  return { width, height };
+}
+
+function escapeFilterPath(filePath: string) {
+  return filePath.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+}
+
+function atempoChain(speed: number) {
+  let remaining = Math.min(4, Math.max(0.25, speed));
+  const filters: string[] = [];
+  while (remaining > 2.0001) {
+    filters.push("atempo=2");
+    remaining /= 2;
+  }
+  while (remaining < 0.5001) {
+    filters.push("atempo=0.5");
+    remaining /= 0.5;
+  }
+  filters.push(`atempo=${remaining.toFixed(4)}`);
+  return filters.join(",");
+}
+
+export async function loadMediaForRender(id: string): Promise<{ row: MediaItem; absolutePath: string }> {
+  const rows = await db.select().from(media).where(eq(media.id, id)).limit(1);
+  const row = rows[0];
+  if (!row) throw new Error(`Media ${id} was not found`);
+  const absolutePath = resolveDataPath(row.relativePath);
+  if (!fs.existsSync(absolutePath)) throw new Error(`Media file missing: ${row.name}`);
+  return { row, absolutePath };
+}
+
+const loadMedia = loadMediaForRender;
+
+type InputPlan = {
+  args: string[];
+  indexById: Map<string, number>;
+  nextIndex: number;
+};
+
+function createInputPlan(): InputPlan {
+  return { args: [], indexById: new Map(), nextIndex: 0 };
+}
+
+function addInput(plan: InputPlan, key: string, absolutePath: string, options: { loop?: boolean; streamLoop?: boolean } = {}) {
+  if (plan.indexById.has(key)) return plan.indexById.get(key)!;
+  if (options.streamLoop) plan.args.push("-stream_loop", "-1");
+  if (options.loop) plan.args.push("-loop", "1");
+  plan.args.push("-i", absolutePath);
+  const index = plan.nextIndex;
+  plan.indexById.set(key, index);
+  plan.nextIndex += 1;
+  return index;
+}
+
+type TimelineSegment = {
+  clip?: TimelineClip;
+  mediaRow?: MediaItem;
+  absolutePath?: string;
+  duration: number;
+  gap: boolean;
+};
+
+async function buildSegments(timeline: TimelineData): Promise<{ segments: TimelineSegment[]; total: number }> {
+  const videoTracks = timeline.tracks.filter((track) => track.kind === "video" && track.visible);
+  const trackId = videoTracks[0]?.id;
+  let clips = timeline.clips
+    .filter((clip) => (clip.kind === "video" || clip.kind === "image") && (!trackId || clip.trackId === trackId))
+    .sort((a, b) => a.start - b.start);
+  if (clips.length === 0) {
+    clips = timeline.clips
+      .filter((clip) => clip.kind === "video" || clip.kind === "image")
+      .sort((a, b) => a.start - b.start);
+  }
+  if (clips.length === 0) throw new Error("Timeline has no video or image clips to render");
+
+  const segments: TimelineSegment[] = [];
+  let cursor = 0;
+  for (const clip of clips) {
+    if (clip.start > cursor + 0.01) {
+      segments.push({ duration: clip.start - cursor, gap: true });
+      cursor = clip.start;
+    }
+    const duration = Math.max(0.1, clip.duration / Math.max(0.25, clip.speed));
+    if (clip.mediaId) {
+      const loaded = await loadMedia(clip.mediaId);
+      segments.push({
+        clip,
+        mediaRow: loaded.row,
+        absolutePath: loaded.absolutePath,
+        duration,
+        gap: false,
+      });
+    } else if (clip.kind === "image") {
+      segments.push({ clip, duration, gap: true });
+    } else {
+      segments.push({ clip, duration, gap: true });
+    }
+    cursor = clip.start + duration;
+  }
+  const total = segments.reduce((sum, segment) => sum + segment.duration, 0);
+  return { segments, total: Math.max(0.5, total) };
+}
+
+export function buildTimelineFromSegments(input: {
+  sourceMediaId: string;
+  sourceDuration: number | null;
+  segments: ClipSegment[];
+  aspectRatio: string;
+  resolution: string;
+  fps: number;
+  name?: string;
+}): TimelineData {
+  const { width, height } = parseResolution(input.resolution);
+  const clips: TimelineClip[] = input.segments.map((segment, index) => ({
+    id: `clip-${index + 1}`,
+    trackId: "v1",
+    mediaId: input.sourceMediaId,
+    name: segment.title ?? input.name ?? `Clip ${index + 1}`,
+    kind: "video",
+    start: index === 0 ? 0 : input.segments.slice(0, index).reduce((sum, item) => sum + (item.end - item.start), 0),
+    duration: Math.max(0.2, segment.end - segment.start),
+    inPoint: Math.max(0, segment.start),
+    speed: 1,
+    volume: 1,
+    fit: "cover",
+  }));
+  return {
+    tracks: [
+      { id: "v1", name: "Video 1", kind: "video", locked: false, visible: true, muted: false },
+      { id: "a1", name: "Audio 1", kind: "audio", locked: false, visible: true, muted: false },
+    ],
+    clips,
+    settings: {
+      width,
+      height,
+      fps: input.fps,
+      aspectRatio: input.aspectRatio,
+      background: "#101116",
+    },
+  };
+}
+
+async function renderTimelineSpec(
+  spec: Extract<RenderSpec, { type: "timeline" }>,
+  outputPath: string,
+  onProgress: RenderProgress,
+  signal?: AbortSignal,
+) {
+  const { segments, total } = await buildSegments(spec.timeline);
+  const width = spec.timeline.settings.width;
+  const height = spec.timeline.settings.height;
+  const fps = spec.timeline.settings.fps;
+  const background = spec.timeline.settings.background || "#101116";
+
+  const plan = createInputPlan();
+  const filterParts: string[] = [];
+  const videoLabels: string[] = [];
+  const audioLabels: string[] = [];
+  let anySourceAudio = false;
+
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    const label = `v${index}`;
+    if (segment.gap || !segment.clip || !segment.absolutePath || !segment.mediaRow) {
+      filterParts.push(
+        `color=c=${background.replace("#", "0x")}:s=${width}x${height}:r=${fps}:d=${segment.duration.toFixed(3)},format=yuv420p,setsar=1[${label}]`,
+      );
+      filterParts.push(
+        `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=${segment.duration.toFixed(3)},asetpts=PTS-STARTPTS[${label}a]`,
+      );
+      videoLabels.push(`[${label}]`);
+      audioLabels.push(`[${label}a]`);
+      continue;
+    }
+
+    const clip = segment.clip;
+    const isImage = segment.mediaRow.kind === "image";
+    const inputIndex = addInput(plan, `media:${clip.mediaId}`, segment.absolutePath, {
+      loop: isImage,
+    });
+    const speed = Math.max(0.25, Math.min(4, clip.speed || 1));
+    const start = Math.max(0, clip.inPoint);
+    const sourceEnd = start + segment.duration * speed;
+
+    const fit =
+      clip.fit === "contain"
+        ? `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=${background.replace("#", "0x")}`
+        : `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
+
+    const effects = clip.effects ?? {};
+    const filters = [
+      `trim=start=${start.toFixed(3)}:end=${sourceEnd.toFixed(3)}`,
+      "setpts=PTS-STARTPTS",
+    ];
+    if (speed !== 1) filters.push(`setpts=PTS/${speed.toFixed(4)}`);
+    filters.push(fit, `fps=${fps}`);
+    if (
+      effects.brightness !== undefined ||
+      effects.contrast !== undefined ||
+      effects.saturation !== undefined
+    ) {
+      filters.push(
+        `eq=brightness=${(effects.brightness ?? 1) - 1}:contrast=${effects.contrast ?? 1}:saturation=${effects.saturation ?? 1}`,
+      );
+    }
+    if (effects.blur && effects.blur > 0) filters.push(`boxblur=${effects.blur}:1`);
+    if (effects.fadeIn && effects.fadeIn > 0) {
+      filters.push(`fade=t=in:st=0:d=${effects.fadeIn}`);
+    }
+    if (effects.fadeOut && effects.fadeOut > 0) {
+      filters.push(
+        `fade=t=out:st=${Math.max(0, segment.duration - effects.fadeOut).toFixed(3)}:d=${effects.fadeOut}`,
+      );
+    }
+    filters.push("format=yuv420p", "setsar=1");
+    filterParts.push(`[${inputIndex}:v]${filters.join(",")}[${label}]`);
+
+    const volume = clip.volume ?? 1;
+    if (segment.mediaRow.hasAudio) {
+      anySourceAudio = true;
+      const audioFilters = [
+        `atrim=start=${start.toFixed(3)}:end=${sourceEnd.toFixed(3)}`,
+        "asetpts=PTS-STARTPTS",
+        "aresample=48000",
+        "aformat=sample_fmts=fltp:channel_layouts=stereo",
+      ];
+      if (speed !== 1) audioFilters.push(atempoChain(speed));
+      if (volume !== 1) audioFilters.push(`volume=${volume}`);
+      filterParts.push(`[${inputIndex}:a]${audioFilters.join(",")}[${label}a]`);
+    } else {
+      filterParts.push(
+        `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=${segment.duration.toFixed(3)},asetpts=PTS-STARTPTS[${label}a]`,
+      );
+    }
+    videoLabels.push(`[${label}]`);
+    audioLabels.push(`[${label}a]`);
+  }
+
+  await onProgress("Rendering", 0.05, `Compositing ${segments.length} segment(s)`);
+
+  filterParts.push(
+    `${videoLabels.join("")}concat=n=${videoLabels.length}:v=1:a=0[vcat]`,
+  );
+
+  const cues: SubtitleCue[] = [
+    ...(spec.subtitles?.cues ?? []),
+    ...cuesFromTimelineText(spec.timeline),
+  ];
+  let videoOut = "vcat";
+  if (cues.length > 0) {
+    const style: SubtitleStyle = spec.subtitles?.style ?? defaultSubtitleStyle;
+    fs.mkdirSync(dirs.temp, { recursive: true });
+    const assPath = path.join(dirs.temp, `subs-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.ass`);
+    fs.writeFileSync(assPath, buildAssFile({ width, height, cues, style }), "utf8");
+    filterParts.push(`[vcat]ass='${escapeFilterPath(assPath)}'[vout]`);
+    videoOut = "vout";
+  }
+
+  filterParts.push(
+    `${audioLabels.join("")}concat=n=${audioLabels.length}:v=0:a=1[asrc]`,
+  );
+
+  let audioOut = "asrc";
+  if (spec.music) {
+    const music = await loadMedia(spec.music.mediaId);
+    const musicIndex = addInput(plan, `music:${spec.music.mediaId}`, music.absolutePath, {
+      streamLoop: true,
+    });
+    filterParts.push(
+      `[${musicIndex}:a]atrim=duration=${total.toFixed(3)},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${spec.music.volume}[music]`,
+    );
+    if (anySourceAudio) {
+      filterParts.push(
+        `[asrc][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed]`,
+      );
+      audioOut = "amixed";
+    } else {
+      audioOut = "music";
+    }
+  }
+
+  const args = [
+    ...plan.args,
+    "-filter_complex",
+    filterParts.join(";"),
+    "-map",
+    `[${videoOut}]`,
+    "-map",
+    `[${audioOut}]`,
+    "-t",
+    total.toFixed(3),
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-crf",
+    "20",
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "192k",
+    "-ar",
+    "48000",
+    "-movflags",
+    "+faststart",
+    "-y",
+    outputPath,
+  ];
+
+  const result = await runFfmpeg(args, {
+    totalDuration: total,
+    signal,
+    timeoutMs: 45 * 60 * 1000,
+    onProgress: (fraction, log) => {
+      onProgress("Rendering", 0.1 + fraction * 0.85, log);
+    },
+  });
+
+  if (result.code !== 0) {
+    const tail = result.stderr.split("\n").slice(-12).join("\n");
+    throw new Error(`FFmpeg exited with code ${result.code}\n${tail}`);
+  }
+}
+
+async function renderClipsSpec(
+  spec: Extract<RenderSpec, { type: "clips" }>,
+  outputPath: string,
+  onProgress: RenderProgress,
+  signal?: AbortSignal,
+) {
+  const source = await loadMedia(spec.sourceMediaId);
+  const totalSourceDuration = source.row.durationSec ?? 0;
+
+  const timelineData = buildTimelineFromSegments({
+    sourceMediaId: spec.sourceMediaId,
+    sourceDuration: totalSourceDuration,
+    segments: spec.segments,
+    aspectRatio: spec.aspectRatio,
+    resolution: spec.resolution,
+    fps: spec.fps,
+  });
+
+  let cues = spec.subtitles?.cues ?? [];
+  if (cues.length > 0) {
+    const shifted: SubtitleCue[] = [];
+    let offset = 0;
+    for (const segment of spec.segments) {
+      const segmentDuration = segment.end - segment.start;
+      const overlapping = cues.filter(
+        (cue) => cue.end > segment.start && cue.start < segment.end,
+      );
+      for (const cue of overlapping) {
+        const start = Math.max(0, cue.start - segment.start) + offset;
+        const end = Math.min(segmentDuration, cue.end - segment.start) + offset;
+        if (end > start) {
+          shifted.push({
+            ...cue,
+            id: `${cue.id}-${offset.toFixed(2)}`,
+            start,
+            end,
+          });
+        }
+      }
+      offset += segmentDuration;
+    }
+    cues = shifted;
+  }
+
+  if (spec.titleCard) {
+    cues = [
+      {
+        id: "title-card",
+        start: 0,
+        end: Math.min(2.4, timelineData.clips.reduce((sum, clip) => sum + clip.duration, 0)),
+        text: spec.titleCard,
+      },
+      ...cues,
+    ];
+  }
+
+  await renderTimelineSpec(
+    {
+      type: "timeline",
+      timeline: timelineData,
+      subtitles: cues.length > 0 ? { cues, style: spec.subtitles?.style ?? defaultSubtitleStyle } : null,
+      music: null,
+      duration: timelineData.clips.reduce((sum, clip) => sum + clip.duration, 0),
+    },
+    outputPath,
+    onProgress,
+    signal,
+  );
+}
+
+async function renderConvertSpec(
+  spec: Extract<RenderSpec, { type: "convert" }>,
+  outputPath: string,
+  onProgress: RenderProgress,
+  signal?: AbortSignal,
+) {
+  const source = await loadMedia(spec.sourceMediaId);
+  const duration = source.row.durationSec ?? 10;
+  const start = spec.start ?? 0;
+  const end = spec.end ?? duration;
+  const timelineData = buildTimelineFromSegments({
+    sourceMediaId: spec.sourceMediaId,
+    sourceDuration: duration,
+    segments: [{ start, end }],
+    aspectRatio: spec.aspectRatio,
+    resolution: spec.resolution,
+    fps: spec.fps,
+  });
+  await renderTimelineSpec(
+    {
+      type: "timeline",
+      timeline: timelineData,
+      subtitles: null,
+      music: null,
+      duration: end - start,
+    },
+    outputPath,
+    onProgress,
+    signal,
+  );
+}
+
+async function renderMotionSpec(
+  spec: Extract<RenderSpec, { type: "motion" }>,
+  outputPath: string,
+  onProgress: RenderProgress,
+  signal?: AbortSignal,
+) {
+  const { composition } = spec;
+  const { width, height } = parseResolution(spec.resolution);
+  fs.mkdirSync(dirs.temp, { recursive: true });
+  const assPath = path.join(dirs.temp, `motion-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.ass`);
+  fs.writeFileSync(assPath, buildMotionAss({ ...composition, width, height }), "utf8");
+
+  const plan = createInputPlan();
+  const filterParts: string[] = [];
+  let hasAudio = false;
+
+  if (spec.backgroundMediaId) {
+    const background = await loadMedia(spec.backgroundMediaId);
+    const index = addInput(plan, `media:${spec.backgroundMediaId}`, background.absolutePath);
+    filterParts.push(
+      `[${index}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},fps=${spec.fps},trim=duration=${spec.duration},setpts=PTS-STARTPTS,ass='${escapeFilterPath(assPath)}'[vout]`,
+    );
+    if (background.row.hasAudio) {
+      hasAudio = true;
+      filterParts.push(
+        `[${index}:a]atrim=duration=${spec.duration},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[aout]`,
+      );
+    }
+  } else {
+    filterParts.push(
+      `color=c=${composition.background.replace("#", "0x")}:s=${width}x${height}:r=${spec.fps}:d=${spec.duration},ass='${escapeFilterPath(assPath)}'[vout]`,
+    );
+  }
+
+  if (!hasAudio) {
+    filterParts.push(
+      `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=${spec.duration},asetpts=PTS-STARTPTS[aout]`,
+    );
+  }
+
+  await onProgress("Rendering", 0.1, "Rendering motion composition");
+  const result = await runFfmpeg(
+    [
+      ...plan.args,
+      "-filter_complex",
+      filterParts.join(";"),
+      "-map",
+      "[vout]",
+      "-map",
+      "[aout]",
+      "-t",
+      spec.duration.toFixed(3),
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "20",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
+      "-movflags",
+      "+faststart",
+      "-y",
+      outputPath,
+    ],
+    {
+      totalDuration: spec.duration,
+      signal,
+      onProgress: (fraction, log) => onProgress("Rendering", 0.1 + fraction * 0.85, log),
+    },
+  );
+
+  if (result.code !== 0) {
+    throw new Error(`FFmpeg exited with code ${result.code}\n${result.stderr.split("\n").slice(-10).join("\n")}`);
+  }
+}
+
+async function renderAudioSpec(
+  spec: Extract<RenderSpec, { type: "audio" }>,
+  outputPath: string,
+  onProgress: RenderProgress,
+  signal?: AbortSignal,
+) {
+  const source = await loadMedia(spec.sourceMediaId);
+  const ops = spec.operations;
+  const filters: string[] = [];
+  if (ops.trimStart !== undefined || ops.trimEnd !== undefined) {
+    filters.push(
+      `atrim=start=${(ops.trimStart ?? 0).toFixed(3)}:end=${(ops.trimEnd ?? source.row.durationSec ?? 0).toFixed(3)}`,
+    );
+    filters.push("asetpts=PTS-STARTPTS");
+  }
+  if (ops.volume !== undefined && ops.volume !== 1) filters.push(`volume=${ops.volume}`);
+  if (ops.normalize) filters.push("loudnorm=I=-16:TP=-1.5:LRA=11");
+  const duration = Math.max(
+    0.1,
+    (ops.trimEnd ?? source.row.durationSec ?? 1) - (ops.trimStart ?? 0),
+  );
+  if (ops.fadeIn && ops.fadeIn > 0) filters.push(`afade=t=in:st=0:d=${ops.fadeIn}`);
+  if (ops.fadeOut && ops.fadeOut > 0) {
+    filters.push(`afade=t=out:st=${Math.max(0, duration - ops.fadeOut).toFixed(3)}:d=${ops.fadeOut}`);
+  }
+  if (filters.length === 0) filters.push("anull");
+
+  const codec =
+    ops.format === "wav"
+      ? ["-c:a", "pcm_s16le"]
+      : ops.format === "m4a"
+        ? ["-c:a", "aac", "-b:a", "192k"]
+        : ["-c:a", "libmp3lame", "-b:a", "192k"];
+
+  await onProgress("Processing", 0.08, "Processing audio");
+  const result = await runFfmpeg(
+    [
+      "-i",
+      source.absolutePath,
+      "-vn",
+      "-af",
+      filters.join(","),
+      ...codec,
+      "-ar",
+      "48000",
+      "-y",
+      outputPath,
+    ],
+    {
+      totalDuration: duration,
+      signal,
+      onProgress: (fraction, log) => onProgress("Processing", 0.08 + fraction * 0.88, log),
+    },
+  );
+  if (result.code !== 0) {
+    throw new Error(`FFmpeg exited with code ${result.code}\n${result.stderr.split("\n").slice(-10).join("\n")}`);
+  }
+}
+
+export async function executeRenderSpec(
+  spec: RenderSpec,
+  outputPath: string,
+  onProgress: RenderProgress,
+  signal?: AbortSignal,
+) {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  await onProgress("Preparing", 0.02, `FFmpeg engine: ${FFMPEG_PATH}`);
+
+  if (spec.type === "timeline") {
+    await renderTimelineSpec(spec, outputPath, onProgress, signal);
+  } else if (spec.type === "clips") {
+    await renderClipsSpec(spec, outputPath, onProgress, signal);
+  } else if (spec.type === "convert") {
+    await renderConvertSpec(spec, outputPath, onProgress, signal);
+  } else if (spec.type === "motion") {
+    await renderMotionSpec(spec, outputPath, onProgress, signal);
+  } else if (spec.type === "audio") {
+    await renderAudioSpec(spec, outputPath, onProgress, signal);
+  } else {
+    throw new Error("Unsupported render specification");
+  }
+
+  await onProgress("Verifying", 0.97, "Verifying output file");
+  const stat = fs.statSync(outputPath);
+  if (stat.size < 1024) {
+    throw new Error("Render produced an empty or invalid file");
+  }
+  const probe = await probeMedia(outputPath);
+  if (!probe.durationSec && spec.type !== "audio") {
+    throw new Error("Output file could not be verified as playable media");
+  }
+  await onProgress("Completed", 1, `Verified ${(stat.size / 1024 / 1024).toFixed(2)} MB output`);
+  return { sizeBytes: stat.size, durationSec: probe.durationSec };
+}
