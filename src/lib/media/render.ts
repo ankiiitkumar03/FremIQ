@@ -8,7 +8,6 @@ import type {
   ClipSegment,
   RenderSpec,
   SubtitleCue,
-  SubtitleStyle,
   TimelineClip,
   TimelineData,
 } from "@/lib/types";
@@ -89,55 +88,6 @@ function addInput(plan: InputPlan, key: string, absolutePath: string, options: {
   return index;
 }
 
-type TimelineSegment = {
-  clip?: TimelineClip;
-  mediaRow?: MediaItem;
-  absolutePath?: string;
-  duration: number;
-  gap: boolean;
-};
-
-async function buildSegments(timeline: TimelineData): Promise<{ segments: TimelineSegment[]; total: number }> {
-  const videoTracks = timeline.tracks.filter((track) => track.kind === "video" && track.visible);
-  const trackId = videoTracks[0]?.id;
-  let clips = timeline.clips
-    .filter((clip) => (clip.kind === "video" || clip.kind === "image") && (!trackId || clip.trackId === trackId))
-    .sort((a, b) => a.start - b.start);
-  if (clips.length === 0) {
-    clips = timeline.clips
-      .filter((clip) => clip.kind === "video" || clip.kind === "image")
-      .sort((a, b) => a.start - b.start);
-  }
-  if (clips.length === 0) throw new Error("Timeline has no video or image clips to render");
-
-  const segments: TimelineSegment[] = [];
-  let cursor = 0;
-  for (const clip of clips) {
-    if (clip.start > cursor + 0.01) {
-      segments.push({ duration: clip.start - cursor, gap: true });
-      cursor = clip.start;
-    }
-    const duration = Math.max(0.1, clip.duration / Math.max(0.25, clip.speed));
-    if (clip.mediaId) {
-      const loaded = await loadMedia(clip.mediaId);
-      segments.push({
-        clip,
-        mediaRow: loaded.row,
-        absolutePath: loaded.absolutePath,
-        duration,
-        gap: false,
-      });
-    } else if (clip.kind === "image") {
-      segments.push({ clip, duration, gap: true });
-    } else {
-      segments.push({ clip, duration, gap: true });
-    }
-    cursor = clip.start + duration;
-  }
-  const total = segments.reduce((sum, segment) => sum + segment.duration, 0);
-  return { segments, total: Math.max(0.5, total) };
-}
-
 export function buildTimelineFromSegments(input: {
   sourceMediaId: string;
   sourceDuration: number | null;
@@ -183,182 +133,139 @@ async function renderTimelineSpec(
   onProgress: RenderProgress,
   signal?: AbortSignal,
 ) {
-  const { segments, total } = await buildSegments(spec.timeline);
-  const width = spec.timeline.settings.width;
-  const height = spec.timeline.settings.height;
-  const fps = spec.timeline.settings.fps;
-  const background = spec.timeline.settings.background || "#101116";
+  const timeline = spec.timeline;
+  const { width, height, fps } = timeline.settings;
+  const background = /^#[0-9a-f]{6}$/i.test(timeline.settings.background)
+    ? timeline.settings.background.replace("#", "0x")
+    : "0x101116";
+  const tracks = new Map(timeline.tracks.map((track) => [track.id, track]));
+  const clips = timeline.clips.filter((clip) => tracks.get(clip.trackId)?.visible !== false);
+  const total = Math.max(
+    spec.duration,
+    ...clips.map((clip) => clip.start + clip.duration),
+    0.5,
+  );
+  const visualClips = clips.filter(
+    (clip) => (clip.kind === "video" || clip.kind === "image") && tracks.get(clip.trackId)?.kind !== "audio",
+  );
+  if (visualClips.length === 0) throw new Error("Timeline has no visible video or image clips to render");
 
   const plan = createInputPlan();
-  const filterParts: string[] = [];
-  const videoLabels: string[] = [];
-  const audioLabels: string[] = [];
-  let anySourceAudio = false;
+  const filters: string[] = [];
+  filters.push(`color=c=${background}:s=${width}x${height}:r=${fps}:d=${total.toFixed(3)},format=rgba[canvas0]`);
+  let canvas = "canvas0";
 
-  for (let index = 0; index < segments.length; index += 1) {
-    const segment = segments[index];
-    const label = `v${index}`;
-    if (segment.gap || !segment.clip || !segment.absolutePath || !segment.mediaRow) {
-      filterParts.push(
-        `color=c=${background.replace("#", "0x")}:s=${width}x${height}:r=${fps}:d=${segment.duration.toFixed(3)},format=yuv420p,setsar=1[${label}]`,
-      );
-      filterParts.push(
-        `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=${segment.duration.toFixed(3)},asetpts=PTS-STARTPTS[${label}a]`,
-      );
-      videoLabels.push(`[${label}]`);
-      audioLabels.push(`[${label}a]`);
-      continue;
-    }
-
-    const clip = segment.clip;
-    const isImage = segment.mediaRow.kind === "image";
-    const inputIndex = addInput(plan, `media:${clip.mediaId}`, segment.absolutePath, {
-      loop: isImage,
-    });
+  const orderedVisuals = [...visualClips].sort((left, right) => {
+    const leftTrack = timeline.tracks.findIndex((track) => track.id === left.trackId);
+    const rightTrack = timeline.tracks.findIndex((track) => track.id === right.trackId);
+    // Tracks are displayed top-to-bottom, so render the lower rows first and
+    // the top row last to keep the visual stacking order intuitive.
+    return rightTrack - leftTrack || left.start - right.start;
+  });
+  for (let index = 0; index < orderedVisuals.length; index += 1) {
+    const clip = orderedVisuals[index];
+    if (!clip.mediaId) continue;
+    const mediaItem = await loadMedia(clip.mediaId);
+    const isImage = mediaItem.row.kind === "image" || clip.kind === "image";
+    const inputIndex = addInput(plan, `timeline:${clip.mediaId}`, mediaItem.absolutePath, { loop: isImage });
     const speed = Math.max(0.25, Math.min(4, clip.speed || 1));
-    const start = Math.max(0, clip.inPoint);
-    const sourceEnd = start + segment.duration * speed;
-
-    const fit =
-      clip.fit === "contain"
-        ? `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=${background.replace("#", "0x")}`
-        : `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
-
-    const effects = clip.effects ?? {};
-    const filters = [
-      `trim=start=${start.toFixed(3)}:end=${sourceEnd.toFixed(3)}`,
-      "setpts=PTS-STARTPTS",
+    const duration = Math.max(0.1, clip.duration);
+    const sourceStart = Math.max(0, clip.inPoint);
+    const sourceDuration = duration * speed;
+    const fit = clip.fit === "contain"
+      ? `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=${background}`
+      : `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
+    const label = `layer${index}`;
+    const sourceFilters = [
+      `trim=start=${sourceStart.toFixed(3)}:duration=${sourceDuration.toFixed(3)}`,
+      `setpts=(PTS-STARTPTS)/${speed.toFixed(4)}+${clip.start.toFixed(3)}/TB`,
+      fit,
+      `fps=${fps}`,
     ];
-    if (speed !== 1) filters.push(`setpts=PTS/${speed.toFixed(4)}`);
-    filters.push(fit, `fps=${fps}`);
-    if (
-      effects.brightness !== undefined ||
-      effects.contrast !== undefined ||
-      effects.saturation !== undefined
-    ) {
-      filters.push(
-        `eq=brightness=${(effects.brightness ?? 1) - 1}:contrast=${effects.contrast ?? 1}:saturation=${effects.saturation ?? 1}`,
-      );
+    const effects = clip.effects ?? {};
+    if (effects.brightness !== undefined || effects.contrast !== undefined || effects.saturation !== undefined) {
+      sourceFilters.push(`eq=brightness=${(effects.brightness ?? 1) - 1}:contrast=${effects.contrast ?? 1}:saturation=${effects.saturation ?? 1}`);
     }
-    if (effects.blur && effects.blur > 0) filters.push(`boxblur=${effects.blur}:1`);
-    if (effects.fadeIn && effects.fadeIn > 0) {
-      filters.push(`fade=t=in:st=0:d=${effects.fadeIn}`);
-    }
+    if (effects.blur && effects.blur > 0) sourceFilters.push(`boxblur=${effects.blur}:1`);
+    if (effects.fadeIn && effects.fadeIn > 0) sourceFilters.push(`fade=t=in:st=0:d=${effects.fadeIn}:alpha=1`);
     if (effects.fadeOut && effects.fadeOut > 0) {
-      filters.push(
-        `fade=t=out:st=${Math.max(0, segment.duration - effects.fadeOut).toFixed(3)}:d=${effects.fadeOut}`,
-      );
+      sourceFilters.push(`fade=t=out:st=${Math.max(0, duration - effects.fadeOut).toFixed(3)}:d=${effects.fadeOut}:alpha=1`);
     }
-    filters.push("format=yuv420p", "setsar=1");
-    filterParts.push(`[${inputIndex}:v]${filters.join(",")}[${label}]`);
-
-    const volume = clip.volume ?? 1;
-    if (segment.mediaRow.hasAudio) {
-      anySourceAudio = true;
-      const audioFilters = [
-        `atrim=start=${start.toFixed(3)}:end=${sourceEnd.toFixed(3)}`,
-        "asetpts=PTS-STARTPTS",
-        "aresample=48000",
-        "aformat=sample_fmts=fltp:channel_layouts=stereo",
-      ];
-      if (speed !== 1) audioFilters.push(atempoChain(speed));
-      if (volume !== 1) audioFilters.push(`volume=${volume}`);
-      filterParts.push(`[${inputIndex}:a]${audioFilters.join(",")}[${label}a]`);
-    } else {
-      filterParts.push(
-        `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=${segment.duration.toFixed(3)},asetpts=PTS-STARTPTS[${label}a]`,
-      );
-    }
-    videoLabels.push(`[${label}]`);
-    audioLabels.push(`[${label}a]`);
+    sourceFilters.push("format=rgba", "setsar=1");
+    filters.push(`[${inputIndex}:v]${sourceFilters.join(",")}[${label}]`);
+    const nextCanvas = `canvas${index + 1}`;
+    const clipEnd = Math.min(total, clip.start + duration);
+    filters.push(`[${canvas}][${label}]overlay=0:0:eof_action=pass:shortest=0:enable='between(t,${clip.start.toFixed(3)},${clipEnd.toFixed(3)})'[${nextCanvas}]`);
+    canvas = nextCanvas;
   }
 
-  await onProgress("Rendering", 0.05, `Compositing ${segments.length} segment(s)`);
+  const audioLabels: string[] = [];
+  let audioIndex = 0;
+  for (const clip of clips) {
+    const track = tracks.get(clip.trackId);
+    if (track?.muted || !clip.mediaId || (clip.kind !== "audio" && clip.kind !== "video")) continue;
+    const mediaItem = await loadMedia(clip.mediaId);
+    if (!mediaItem.row.hasAudio) continue;
+    const inputIndex = addInput(plan, `timeline:${clip.mediaId}`, mediaItem.absolutePath);
+    const speed = Math.max(0.25, Math.min(4, clip.speed || 1));
+    const sourceStart = Math.max(0, clip.inPoint);
+    const duration = Math.max(0.1, clip.duration);
+    const label = `aud${audioIndex++}`;
+    const audioFilters = [
+      `atrim=start=${sourceStart.toFixed(3)}:duration=${(duration * speed).toFixed(3)}`,
+      "asetpts=PTS-STARTPTS",
+      "aresample=48000",
+      "aformat=sample_fmts=fltp:channel_layouts=stereo",
+    ];
+    if (speed !== 1) audioFilters.push(atempoChain(speed));
+    audioFilters.push(`volume=${Math.max(0, Math.min(2, clip.volume ?? 1))}`);
+    audioFilters.push(`adelay=${Math.round(clip.start * 1000)}:all=1`, `apad=pad_dur=${total.toFixed(3)}`, `atrim=duration=${total.toFixed(3)}`, "asetpts=PTS-STARTPTS");
+    filters.push(`[${inputIndex}:a]${audioFilters.join(",")}[${label}]`);
+    audioLabels.push(`[${label}]`);
+  }
 
-  filterParts.push(
-    `${videoLabels.join("")}concat=n=${videoLabels.length}:v=1:a=0[vcat]`,
-  );
+  if (spec.music) {
+    const music = await loadMedia(spec.music.mediaId);
+    const inputIndex = addInput(plan, `timeline-music:${spec.music.mediaId}`, music.absolutePath, { streamLoop: true });
+    filters.push(`[${inputIndex}:a]atrim=duration=${total.toFixed(3)},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${Math.max(0, Math.min(2, spec.music.volume))}[music]`);
+    audioLabels.push("[music]");
+  }
+  if (audioLabels.length === 0) {
+    filters.push(`anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=${total.toFixed(3)}[audioout]`);
+  } else if (audioLabels.length === 1) {
+    filters.push(`${audioLabels[0]}anull[audioout]`);
+  } else {
+    filters.push(`${audioLabels.join("")}amix=inputs=${audioLabels.length}:duration=longest:dropout_transition=0:normalize=0,atrim=duration=${total.toFixed(3)}[audioout]`);
+  }
 
-  const cues: SubtitleCue[] = [
-    ...(spec.subtitles?.cues ?? []),
-    ...cuesFromTimelineText(spec.timeline),
-  ];
-  let videoOut = "vcat";
+  const visibleTextTracks = new Set(timeline.tracks.filter((track) => ["text", "overlay", "subtitle"].includes(track.kind) && track.visible).map((track) => track.id));
+  const textTimeline = { ...timeline, clips: timeline.clips.filter((clip) => clip.kind === "text" && visibleTextTracks.has(clip.trackId)) };
+  const cues = [...(spec.subtitles?.cues ?? []), ...cuesFromTimelineText(textTimeline)];
+  let videoOut = canvas;
   if (cues.length > 0) {
-    const style: SubtitleStyle = spec.subtitles?.style ?? defaultSubtitleStyle;
     fs.mkdirSync(dirs.temp, { recursive: true });
-    const assPath = path.join(dirs.temp, `subs-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.ass`);
-    fs.writeFileSync(assPath, buildAssFile({ width, height, cues, style }), "utf8");
-    filterParts.push(`[vcat]ass='${escapeFilterPath(assPath)}'[vout]`);
+    const assPath = path.join(dirs.temp, `timeline-subs-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.ass`);
+    fs.writeFileSync(assPath, buildAssFile({ width, height, cues, style: spec.subtitles?.style ?? defaultSubtitleStyle }), "utf8");
+    filters.push(`[${canvas}]ass='${escapeFilterPath(assPath)}'[vout]`);
     videoOut = "vout";
   }
 
-  filterParts.push(
-    `${audioLabels.join("")}concat=n=${audioLabels.length}:v=0:a=1[asrc]`,
-  );
-
-  let audioOut = "asrc";
-  if (spec.music) {
-    const music = await loadMedia(spec.music.mediaId);
-    const musicIndex = addInput(plan, `music:${spec.music.mediaId}`, music.absolutePath, {
-      streamLoop: true,
-    });
-    filterParts.push(
-      `[${musicIndex}:a]atrim=duration=${total.toFixed(3)},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${spec.music.volume}[music]`,
-    );
-    if (anySourceAudio) {
-      filterParts.push(
-        `[asrc][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed]`,
-      );
-      audioOut = "amixed";
-    } else {
-      audioOut = "music";
-    }
-  }
-
-  const args = [
+  await onProgress("Rendering", 0.05, `Compositing ${orderedVisuals.length} video layer(s) across ${audioLabels.length} audio track(s)`);
+  const result = await runFfmpeg([
     ...plan.args,
-    "-filter_complex",
-    filterParts.join(";"),
-    "-map",
-    `[${videoOut}]`,
-    "-map",
-    `[${audioOut}]`,
-    "-t",
-    total.toFixed(3),
-    "-c:v",
-    "libx264",
-    "-preset",
-    "veryfast",
-    "-crf",
-    "20",
-    "-pix_fmt",
-    "yuv420p",
-    "-c:a",
-    "aac",
-    "-b:a",
-    "192k",
-    "-ar",
-    "48000",
-    "-movflags",
-    "+faststart",
-    "-y",
-    outputPath,
-  ];
-
-  const result = await runFfmpeg(args, {
+    "-filter_complex", filters.join(";"),
+    "-map", `[${videoOut}]`,
+    "-map", "[audioout]",
+    "-t", total.toFixed(3),
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+    "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", "-y", outputPath,
+  ], {
     totalDuration: total,
     signal,
     timeoutMs: 45 * 60 * 1000,
-    onProgress: (fraction, log) => {
-      onProgress("Rendering", 0.1 + fraction * 0.85, log);
-    },
+    onProgress: (fraction, log) => onProgress("Rendering", 0.1 + fraction * 0.85, log),
   });
-
-  if (result.code !== 0) {
-    const tail = result.stderr.split("\n").slice(-12).join("\n");
-    throw new Error(`FFmpeg exited with code ${result.code}\n${tail}`);
-  }
+  if (result.code !== 0) throw new Error(`FFmpeg timeline composite failed: ${result.stderr.split("\n").slice(-12).join("\n")}`);
 }
 
 async function renderSplitClipsSpec(
