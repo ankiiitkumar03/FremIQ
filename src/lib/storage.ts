@@ -23,8 +23,11 @@ export function ensureDirs() {
 
 export function resolveDataPath(relativePath: string) {
   const normalized = path.normalize(relativePath).replace(/^([/\\])+/, "");
-  const absolute = path.resolve(DATA_ROOT, normalized);
-  if (!absolute.startsWith(path.resolve(DATA_ROOT) + path.sep) && absolute !== path.resolve(DATA_ROOT)) {
+  const absolute = path.resolve(/* turbopackIgnore: true */ DATA_ROOT, normalized);
+  if (
+    !absolute.startsWith(path.resolve(/* turbopackIgnore: true */ DATA_ROOT) + path.sep) &&
+    absolute !== path.resolve(/* turbopackIgnore: true */ DATA_ROOT)
+  ) {
     throw new Error("Path traversal blocked");
   }
   return absolute;

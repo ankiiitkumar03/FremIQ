@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  distDir: process.env.FREMIQ_NEXT_DIST_DIR || ".next",
+  experimental: { cpus: 1, webpackBuildWorker: false },
   reactCompiler: true,
   cacheComponents: false,
   poweredByHeader: false,

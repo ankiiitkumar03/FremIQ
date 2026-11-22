@@ -37,12 +37,12 @@ export function runCommand(
   return new Promise((resolve) => {
     const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
     const child = useShell
-      ? spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", binary, ...args], {
+      ? spawn(/* turbopackIgnore: true */ process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", binary, ...args], {
           cwd: options.cwd,
           windowsHide: true,
           env: { ...process.env, ...options.env },
         })
-      : spawn(binary, args, {
+      : spawn(/* turbopackIgnore: true */ binary, args, {
           cwd: options.cwd,
           windowsHide: true,
           env: { ...process.env, ...options.env },

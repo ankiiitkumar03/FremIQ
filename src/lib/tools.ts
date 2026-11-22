@@ -60,7 +60,7 @@ async function pythonModules(): Promise<Record<string, boolean>> {
   return new Promise((resolve) => {
     const script =
       "import importlib.util,json;mods=['whisper','faster_whisper','torch','cv2','moviepy','numpy','PIL'];print(json.dumps({m: importlib.util.find_spec(m) is not None for m in mods}))";
-    const child = spawn(python, ["-c", script], { windowsHide: true });
+    const child = spawn(/* turbopackIgnore: true */ python, ["-c", script], { windowsHide: true });
     let output = "";
     const timer = setTimeout(() => {
       child.kill("SIGKILL");

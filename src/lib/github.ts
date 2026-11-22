@@ -146,10 +146,10 @@ export async function importRepository(input: {
   }
 
   const branch = input.branch?.trim() || settings.github.defaultBranch || "main";
-  const cloneRoot = path.join(dirs.workspace, projectId);
-  fs.mkdirSync(cloneRoot, { recursive: true });
-  const destination = path.join(cloneRoot, parsed.repo);
-  if (fs.existsSync(destination)) {
+  const cloneRoot = path.join(/* turbopackIgnore: true */ dirs.workspace, projectId);
+  fs.mkdirSync(/* turbopackIgnore: true */ cloneRoot, { recursive: true });
+  const destination = path.join(/* turbopackIgnore: true */ cloneRoot, parsed.repo);
+  if (fs.existsSync(/* turbopackIgnore: true */ destination)) {
     throw new Error(`Workspace already contains ${parsed.repo}. Remove it before importing again.`);
   }
 
