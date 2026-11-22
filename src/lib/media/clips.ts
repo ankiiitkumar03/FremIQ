@@ -82,13 +82,19 @@ export async function generateClipCandidates(input: {
   let scenes: number[] = [];
   let silences: Range[] = [];
 
-  try {
-    [scenes, silences] = await Promise.all([
-      detectScenes(absolutePath),
-      detectSilences(absolutePath),
-    ]);
-  } catch {
-    warnings.push("Scene analysis failed; FREMIQ fell back to evenly spaced highlights.");
+  const [sceneResult, silenceResult] = await Promise.allSettled([
+    detectScenes(absolutePath),
+    detectSilences(absolutePath),
+  ]);
+  if (sceneResult.status === "fulfilled") {
+    scenes = sceneResult.value;
+  } else {
+    warnings.push("Scene detection failed; FREMIQ ranked clips without visual scene changes.");
+  }
+  if (silenceResult.status === "fulfilled") {
+    silences = silenceResult.value;
+  } else {
+    warnings.push("Silence detection failed; FREMIQ ranked clips using scene and transcript cues only.");
   }
 
   const speech = complement(silences, sourceDuration);
