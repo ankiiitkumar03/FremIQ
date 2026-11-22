@@ -26,21 +26,34 @@ async function transcribeWithAgent(input: {
   model: string;
   language: string;
 }) {
-  const form = new FormData();
-  form.append("file", new Blob([new Uint8Array(fs.readFileSync(input.path))]), input.name);
-  form.append("model", input.model);
-  form.append("language", input.language);
-  const response = await fetch(input.url.replace(/\/$/, "") + "/api/transcribe", {
-    method: "POST",
-    headers: input.token ? { Authorization: "Bearer " + input.token } : undefined,
-    body: form,
-    signal: AbortSignal.timeout(15 * 60 * 1000),
-  });
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0, 500);
-    throw new Error("Local Agent transcription failed: " + detail);
+  const audioPath = path.join(os.tmpdir(), "fremiq-local-transcription-" + randomUUID() + ".mp3");
+  try {
+    const converted = await runFfmpeg(
+      ["-i", input.path, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k", "-f", "mp3", audioPath],
+      { timeoutMs: 60 * 60 * 1000 },
+    );
+    if (converted.code !== 0 || !fs.existsSync(audioPath)) {
+      throw new Error("Could not extract audio for local transcription: " + converted.stderr.slice(-300));
+    }
+    const audioName = input.name.replace(/\.[^.]+$/, "") + ".mp3";
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(fs.readFileSync(audioPath))], { type: "audio/mpeg" }), audioName);
+    form.append("model", input.model);
+    form.append("language", input.language);
+    const response = await fetch(input.url.replace(/\/$/, "") + "/api/transcribe", {
+      method: "POST",
+      headers: input.token ? { Authorization: "Bearer " + input.token } : undefined,
+      body: form,
+      signal: AbortSignal.timeout(60 * 60 * 1000),
+    });
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 500);
+      throw new Error("Local Agent transcription failed: " + detail);
+    }
+    return (await response.json()) as { cues?: SubtitleCue[]; language?: string; model?: string };
+  } finally {
+    fs.rmSync(audioPath, { force: true });
   }
-  return (await response.json()) as { cues?: SubtitleCue[]; language?: string; model?: string };
 }
 
 export async function POST(request: Request) {
@@ -177,22 +190,21 @@ export async function POST(request: Request) {
         );
       }
 
-      const form = new FormData();
-      form.append("file", new Blob([new Uint8Array(fs.readFileSync(absolutePath))]), source.name);
-      form.append("model", settings.ai.transcriptionModel || "faster-whisper/base");
-      form.append("language", typeof body.language === "string" ? body.language : "auto");
-
-      const response = await fetch(`${settings.agent.url.replace(/\/$/, "")}/api/transcribe`, {
-        method: "POST",
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-        body: form,
-        signal: AbortSignal.timeout(15 * 60 * 1000),
-      });
-      if (!response.ok) {
-        const text = await response.text();
-        return fail(`Local agent transcription failed: ${text.slice(0, 300)}`, 502);
+      try {
+        result = await transcribeWithAgent({
+          url: settings.agent.url,
+          token,
+          path: absolutePath,
+          name: source.name,
+          model: settings.ai.transcriptionModel || "faster-whisper/base",
+          language: typeof body.language === "string" ? body.language : "auto",
+        });
+      } catch (agentError) {
+        return fail(
+          agentError instanceof Error ? agentError.message : "Local Agent transcription failed",
+          502,
+        );
       }
-      result = (await response.json()) as { cues?: SubtitleCue[]; language?: string; model?: string };
     }
     const cues = result.cues ?? [];
     if (cues.length === 0) return fail("The agent returned no subtitle cues", 502);

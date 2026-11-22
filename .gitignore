@@ -103,6 +103,8 @@ $RECYCLE.BIN/
 *.temp
 *.log
 *.cache
+__pycache__/
+*.py[cod]
 .cache/
 
 # monorepo
