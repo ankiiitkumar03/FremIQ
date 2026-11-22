@@ -230,7 +230,7 @@ export function LocalAgentClient({
           </div>
           <p className="text-[10px] text-muted-foreground">
             Extract the downloaded ZIP and double-click <span className="font-medium">Start FREMIQ Agent.bat</span>.
-            Keep its window open, then pair with the URL and six-digit code it displays. First launch installs the small agent runtime.
+            Keep its window open, then pair with the URL and six-digit code it displays. First launch needs Python 3.10+ and internet access; it installs the agent runtime automatically. The FREMIQ server must run on this same computer for local pairing to work.
           </p>
         </CardContent>
       </Card>
@@ -381,15 +381,14 @@ export function LocalAgentClient({
               </Badge>
             </div>
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              The download includes the agent app and a one-click Windows launcher. Start it, pair it above, and install Faster-Whisper from Tool Manager to transcribe locally without web API credits.
+              Pair this Windows companion to enable local Faster-Whisper transcription without web API credits. The launcher sets up its private runtime and automatically restarts the agent if it needs to restart.
             </p>
             <ul className="space-y-1 text-[11px] text-muted-foreground">
               {[
-                "Local FFmpeg and FFprobe management",
-                "Faster-Whisper transcription",
-                "Media processing and rendering",
-                "Optional extension installation",
-                "Local AI tool connections",
+                "Local Faster-Whisper transcription",
+                "Install approved transcription packages from Tool Manager",
+                "Secure pairing and connection health checks",
+                "Agent diagnostics and automatic restart",
               ].map((item) => (
                 <li key={item} className="flex items-center gap-2">
                   <CheckCircle2 className="h-3 w-3 text-muted-foreground" /> {item}

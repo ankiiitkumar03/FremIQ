@@ -28,11 +28,12 @@ Open http://localhost:4000. FREMIQ has no app login and stores one shared worksp
 
 ## Local transcription
 
-Download the Windows companion from **Local Agent → Download Windows agent** in FREMIQ. Extract it, run **Start FREMIQ Agent.bat**, pair with its displayed URL and code, then install Faster-Whisper from **Tool Manager**. Keep the agent open while transcribing. CPU mode works without an NVIDIA GPU; the first model download may take time.
+Download the Windows companion from **Local Agent → Download Windows agent** in FREMIQ. Extract it, run **Start FREMIQ Agent.bat**, pair with its displayed URL and code, then install Faster-Whisper from **Tool Manager**. The first launch requires Python 3.10+ and internet access; it creates a private environment automatically. Keep the agent window open while transcribing. CPU mode works without an NVIDIA GPU; the first model download may take time. FREMIQ itself must run on the same computer because a remote server cannot reach the agent's local-only address.
 
 ## Development checks
 
 - bun run typecheck
 - bun run lint
+- bun run agent:package (refreshes the downloadable Windows Local Agent ZIP after changing files in local-agent/)
 
 Do not run multiple app replicas: media files and the render queue are local to one app process. Back up PostgreSQL and FREMIQ_DATA_DIR together.
