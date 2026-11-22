@@ -16,8 +16,8 @@ import { probeMedia } from "./probe";
 import {
   buildAssFile,
   buildMotionAss,
-  cuesFromTimelineText,
   defaultSubtitleStyle,
+  textStyleFromClip,
 } from "./subtitles";
 
 export type RenderProgress = (stage: string, fraction: number, log: string) => Promise<void> | void;
@@ -239,15 +239,25 @@ async function renderTimelineSpec(
   }
 
   const visibleTextTracks = new Set(timeline.tracks.filter((track) => ["text", "overlay", "subtitle"].includes(track.kind) && track.visible).map((track) => track.id));
-  const textTimeline = { ...timeline, clips: timeline.clips.filter((clip) => clip.kind === "text" && visibleTextTracks.has(clip.trackId)) };
-  const cues = [...(spec.subtitles?.cues ?? []), ...cuesFromTimelineText(textTimeline)];
+  const textClips = timeline.clips.filter((clip) => clip.kind === "text" && clip.text?.content && visibleTextTracks.has(clip.trackId));
   let videoOut = canvas;
-  if (cues.length > 0) {
+  if (spec.subtitles?.cues.length) {
     fs.mkdirSync(dirs.temp, { recursive: true });
     const assPath = path.join(dirs.temp, `timeline-subs-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.ass`);
-    fs.writeFileSync(assPath, buildAssFile({ width, height, cues, style: spec.subtitles?.style ?? defaultSubtitleStyle }), "utf8");
-    filters.push(`[${canvas}]ass='${escapeFilterPath(assPath)}'[vout]`);
-    videoOut = "vout";
+    fs.writeFileSync(assPath, buildAssFile({ width, height, cues: spec.subtitles.cues, style: spec.subtitles.style ?? defaultSubtitleStyle }), "utf8");
+    filters.push(`[${videoOut}]ass='${escapeFilterPath(assPath)}'[withsubs]`);
+    videoOut = "withsubs";
+  }
+  for (let index = 0; index < textClips.length; index += 1) {
+    const clip = textClips[index];
+    if (!clip.text?.content) continue;
+    fs.mkdirSync(dirs.temp, { recursive: true });
+    const assPath = path.join(dirs.temp, `timeline-title-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}.ass`);
+    const cue: SubtitleCue = { id: clip.id, start: clip.start, end: clip.start + clip.duration, text: clip.text.content };
+    fs.writeFileSync(assPath, buildAssFile({ width, height, cues: [cue], style: textStyleFromClip(clip.text) }), "utf8");
+    const nextVideo = `title${index}`;
+    filters.push(`[${videoOut}]ass='${escapeFilterPath(assPath)}'[${nextVideo}]`);
+    videoOut = nextVideo;
   }
 
   await onProgress("Rendering", 0.05, `Compositing ${orderedVisuals.length} video layer(s) across ${audioLabels.length} audio track(s)`);
