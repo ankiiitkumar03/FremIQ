@@ -25,6 +25,19 @@ const MAX_ZIP_ENTRIES = 500;
 const MAX_ZIP_UNCOMPRESSED = 2 * 1024 * 1024 * 1024;
 const MAX_IMPORTED_FROM_ZIP = 40;
 
+async function removeFileIfUnregistered(relativePath: string, absolutePath: string) {
+  try {
+    const rows = await db
+      .select({ id: media.id })
+      .from(media)
+      .where(eq(media.relativePath, relativePath))
+      .limit(1);
+    if (!rows[0]) fs.rmSync(absolutePath, { force: true });
+  } catch {
+    // Preserve the file if the database cannot confirm whether it has a row.
+  }
+}
+
 function kindFromProbe(kind: string, mime: string, name: string) {
   if (/\.zip$/i.test(name) || mime === "application/zip") return "archive" as const;
   if (kind === "video" || kind === "audio" || kind === "image") return kind;
@@ -83,13 +96,18 @@ export async function importUploadedFile(
   const relativePath = `media/${storedName}`;
   const absolutePath = resolveDataPath(relativePath);
   fs.mkdirSync(dirs.media, { recursive: true });
+  // Stream the upload to disk instead of allocating a second, full-size buffer.
   try {
-    // Stream the upload to disk instead of allocating a second, full-size buffer.
     await pipeline(
       Readable.fromWeb(file.stream() as import("node:stream/web").ReadableStream),
       fs.createWriteStream(absolutePath, { flags: "wx" }),
     );
+  } catch (error) {
+    fs.rmSync(absolutePath, { force: true });
+    throw error;
+  }
 
+  try {
     return await registerImportedFile({
       projectId,
       originalName,
@@ -99,7 +117,7 @@ export async function importUploadedFile(
       absolutePath,
     });
   } catch (error) {
-    fs.rmSync(absolutePath, { force: true });
+    await removeFileIfUnregistered(relativePath, absolutePath);
     throw error;
   }
 }
@@ -127,15 +145,20 @@ export async function importLocalVideoFile(
   fs.mkdirSync(dirs.media, { recursive: true });
   fs.renameSync(sourcePath, absolutePath);
 
-  return registerImportedFile({
-    projectId,
-    originalName: safeFileName(path.basename(originalName, path.extname(originalName))) + extension,
-    mimeType: mimeType.startsWith("video/") ? mimeType : mimeForExtension(extension),
-    sizeBytes: stat.size,
-    relativePath,
-    absolutePath,
-    knownProbe: probe,
-  });
+  try {
+    return await registerImportedFile({
+      projectId,
+      originalName: safeFileName(path.basename(originalName, path.extname(originalName))) + extension,
+      mimeType: mimeType.startsWith("video/") ? mimeType : mimeForExtension(extension),
+      sizeBytes: stat.size,
+      relativePath,
+      absolutePath,
+      knownProbe: probe,
+    });
+  } catch (error) {
+    await removeFileIfUnregistered(relativePath, absolutePath);
+    throw error;
+  }
 }
 
 async function registerImportedFile(input: {
