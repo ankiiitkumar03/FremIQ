@@ -14,7 +14,7 @@ Copy `.env.example` into the deployment environment (do not commit real credenti
 - `FREMIQ_SECRET`: at least 32 random characters. Generate a value with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`. Keep it unchanged and backed up; changing it makes saved Telegram, GitHub, AI, and Local Agent secrets unreadable.
 - `FREMIQ_DATA_DIR`: a persistent writable volume path. Back it up together with PostgreSQL; both are required to restore media and project records.
 
-Run `bun install`, `bun run db:migrate`, `bun run typecheck`, `bun run lint`, and `bun run build` in the release pipeline. Start the built app with `bun run start` or `node_modules/.bin/next start`. The reverse proxy must support uploads up to the configured 2 GB application limit and long-running FFmpeg requests; monitor memory and disk capacity.
+Run `bun install`, `bun run db:migrate`, `bun run typecheck`, `bun run lint`, and `bun run build` in the release pipeline. Start the built app with `bun run start`; it binds to `127.0.0.1` because this release has no application login. A same-host reverse proxy may forward traffic after it enforces private access. Do not change the bind address or expose the app directly to the internet. The reverse proxy must support uploads up to the configured 2 GB application limit and long-running FFmpeg requests; monitor memory and disk capacity.
 
 ## Public launch gate
 
