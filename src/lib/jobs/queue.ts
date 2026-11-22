@@ -272,6 +272,10 @@ async function processJob(jobId: string) {
     const current = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, jobId)).limit(1);
     if (current[0]?.status === "cancelled") return;
 
+    const completedLog = appendLog(
+      logs,
+      `Completed with ${result.backend}: ${result.sizeBytes} bytes, ${result.durationSec ?? 0}s`,
+    );
     await db
       .update(jobs)
       .set({
@@ -282,20 +286,31 @@ async function processJob(jobId: string) {
         outputSizeBytes: result.sizeBytes,
         completedAt: new Date(),
         updatedAt: new Date(),
-        logs: appendLog(
-          logs,
-          `Completed with ${result.backend}: ${result.sizeBytes} bytes, ${result.durationSec ?? 0}s`,
-        ),
+        logs: completedLog,
       })
       .where(eq(jobs.id, jobId));
 
-    await logActivity({
-      projectId: job.projectId,
-      type: "job.completed",
-      message: `Rendered “${job.name}”`,
-      meta: { jobId, output: outputName, sizeBytes: result.sizeBytes },
-    });
-    await deliverTelegramOutput(job, outputAbs);
+    try {
+      await logActivity({
+        projectId: job.projectId,
+        type: "job.completed",
+        message: `Rendered “${job.name}”`,
+        meta: { jobId, output: outputName, sizeBytes: result.sizeBytes },
+      });
+    } catch (error) {
+      console.error(`[fremiq-queue] completion activity could not be recorded for ${jobId}`, error);
+    }
+    try {
+      await deliverTelegramOutput(job, outputAbs);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error(`[fremiq-queue] post-render delivery failed for ${jobId}`, error);
+      try {
+        await updateJob(jobId, { logs: appendLog(completedLog, `Post-render delivery failed: ${detail}`) });
+      } catch {
+        // Keep the completed render even if its follow-up log cannot be saved.
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const current = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, jobId)).limit(1);
