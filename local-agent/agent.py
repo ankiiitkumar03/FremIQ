@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("FREMIQ_AGENT_PORT", "8765"))
 PAIR_CODE = f"{secrets.randbelow(1_000_000):06d}"
@@ -160,6 +160,15 @@ async def transcribe(
     except HTTPException:
         raise
     except Exception as error:
+        if "metadata_errors" in str(error):
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Faster-Whisper and PyAV versions are incompatible. Open Tool Manager, "
+                    "choose Faster-Whisper → Repair / update locally, wait for it to finish, "
+                    "then restart the Local Agent and retry transcription."
+                ),
+            ) from error
         raise HTTPException(status_code=500, detail=f"Local transcription failed: {error}") from error
     finally:
         if temp_path:
