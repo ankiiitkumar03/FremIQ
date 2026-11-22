@@ -148,6 +148,7 @@ export function ToolsClient({
   const [confirmInstall, setConfirmInstall] = React.useState(false);
   const [licenseAccepted, setLicenseAccepted] = React.useState(false);
   const [pending, setPending] = React.useState<string | null>(null);
+  const [toolInstallProgress, setToolInstallProgress] = React.useState("");
   const [showLogs, setShowLogs] = React.useState(false);
   const [config, setConfig] = React.useState({ projectDir: "", entryPoint: "", compositionId: "" });
 
@@ -220,16 +221,33 @@ export function ToolsClient({
 
   async function installSystemTool(tool: ToolInfo) {
     setPending(`tool:${tool.key}`);
+    setToolInstallProgress("Connecting to the Local Agent…");
     try {
       const started = await postJson<{ jobId?: string }>("/api/tools/install", { key: tool.key });
       if (!started.jobId) throw new Error("Local Agent did not return an install job ID");
+      setToolInstallProgress("Install started. Downloading and installing the package…");
       const deadline = Date.now() + 31 * 60 * 1000;
       let status: { status: string; progress?: string; error?: string; output?: string; restartRequired?: boolean } | null = null;
+      let consecutivePollFailures = 0;
       while (Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        status = await apiFetch<{ status: string; progress?: string; error?: string; output?: string; restartRequired?: boolean }>(
-          "/api/tools/install/" + encodeURIComponent(started.jobId),
-        );
+        try {
+          status = await apiFetch<{ status: string; progress?: string; error?: string; output?: string; restartRequired?: boolean }>(
+            "/api/tools/install/" + encodeURIComponent(started.jobId),
+          );
+          consecutivePollFailures = 0;
+          setToolInstallProgress(status.progress || "Installing the package…");
+        } catch (pollError) {
+          const errorStatus = (pollError as Error & { status?: number }).status;
+          const isTransient = errorStatus === undefined || errorStatus === 409 || errorStatus >= 500;
+          if (!isTransient) throw pollError;
+          consecutivePollFailures += 1;
+          if (consecutivePollFailures >= 5) {
+            throw new Error("Could not reconnect to the Local Agent after several attempts. Check that it is running, then re-check Tool Manager.");
+          }
+          setToolInstallProgress(`Local Agent connection interrupted. Retrying (${consecutivePollFailures}/5)…`);
+          continue;
+        }
         if (status.status === "complete") break;
         if (status.status === "failed") {
           throw new Error(status.error || status.output || status.progress || "Local package installation failed");
@@ -245,6 +263,7 @@ export function ToolsClient({
       toast.error(error instanceof Error ? error.message : `Could not install ${tool.name}`);
     } finally {
       setPending(null);
+      setToolInstallProgress("");
     }
   }
 
@@ -565,6 +584,11 @@ export function ToolsClient({
                       </div>
                       <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground"><span className="font-medium text-foreground/80">When:</span> {guidance.when}</p>
                       <p className="text-[10px] leading-relaxed text-muted-foreground"><span className="font-medium text-foreground/80">Device:</span> {guidance.device}</p>
+                      {pending === `tool:${tool.key}` ? (
+                        <p role="status" aria-live="polite" className="mt-1 text-[10px] leading-relaxed text-brand">
+                          {toolInstallProgress}
+                        </p>
+                      ) : null}
                       <details className="mt-1 text-[10px] text-brand">
                         <summary className="w-fit cursor-pointer">{tool.installed ? "Requirements & documentation" : "Requirements & setup"}</summary>
                         <div className="mt-1 space-y-1 leading-relaxed text-muted-foreground">
